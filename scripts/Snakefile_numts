@@ -1,0 +1,684 @@
+"""
+Snakemake pipeline for NUMTS (Nuclear Mitochondrial DNA segments) recovery
+Author: Generated pipeline based on bash script template
+"""
+
+import os
+
+
+# Load configuration
+configfile: "config.yaml"
+
+
+# Define output files based on input type and pipeline mode
+def get_final_outputs(config):
+    """Determine final output files based on configuration."""
+    outputs = []
+    
+    # Always produce these outputs
+    mt_tag = config['mt_scaffolds'][0]
+    outputs.append(f"{config['output_dir']}/numts.txt")
+    outputs.append(f"{config['output_dir']}/records_{mt_tag}.txt")
+    
+    # Optional remapping endpoint
+    if config.get('remap', False):
+        outputs.append(f"{config['output_dir']}/{config['sample_name']}_recovered.bam")
+        outputs.append(f"{config['output_dir']}/{config['sample_name']}_recovered.bam.bai")
+    
+    return outputs
+
+
+# Define final rule
+rule all:
+    input:
+        get_final_outputs(config)
+
+
+# ============================================================================
+# INPUT HANDLING RULES
+# ============================================================================
+
+rule check_ds_reads:
+    """
+    Rule for double-stranded (paired-end) reads.
+    This rule is used when R1 and R2 files are detected.
+    """
+    input:
+        r1 = config.get('input_r1', ''),
+        r2 = config.get('input_r2', '')
+    output:
+        flag = temp(f"{config['output_dir']}/flags/ds_reads_checked.flag")
+    run:
+        if config['input_type'] == 'ds':
+            shell("mkdir -p {config[output_dir]}/flags && touch {output.flag}")
+        else:
+            # This rule shouldn't run for non-ds input
+            pass
+
+
+rule check_ss_reads:
+    """
+    Rule for single-stranded (single-end) reads.
+    This rule is used when only single FASTQ file is found.
+    WARNING: User is warned about reduced sensitivity.
+    """
+    input:
+        fastq = config.get('input_fastq', '')
+    output:
+        flag = temp(f"{config['output_dir']}/flags/ss_reads_checked.flag")
+    run:
+        if config['input_type'] == 'ss':
+            print("WARNING: Using single-stranded read mode - may reduce NUMTS detection sensitivity")
+            shell("mkdir -p {config[output_dir]}/flags && touch {output.flag}")
+        else:
+            # This rule shouldn't run for non-ss input
+            pass
+
+
+# ============================================================================
+# PREPROCESSING RULES (for FASTQ inputs)
+# ============================================================================
+
+rule fastp_preprocess_ds:
+    """
+    Preprocess paired-end reads with fastp.
+    Performs deduplication, quality filtering, and merging.
+    """
+    input:
+        r1 = config.get('input_r1', ''),
+        r2 = config.get('input_r2', ''),
+        flag = f"{config['output_dir']}/flags/ds_reads_checked.flag"
+    output:
+        merged = temp(f"{config['output_dir']}/preprocessed/{config['sample_name']}-merged.fastq") if not config.get('keep_temp') else f"{config['output_dir']}/preprocessed/{config['sample_name']}-merged.fastq",
+        json = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.json",
+        html = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.html"
+    threads:
+        config['threads']
+    params:
+        min_quality = config['min_quality'],
+        min_length = config['min_length']
+    log:
+        f"{config['output_dir']}/logs/fastp_preprocess.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/preprocessed {config[output_dir]}/logs
+        {config[fastp]} --dedup -g -j {output.json} -h {output.html} \
+            -i {input.r1} -I {input.r2} \
+            -V -w {threads} -q {params.min_quality} -l {params.min_length} \
+            --merged_out {output.merged} -m \
+            2> {log}
+        """
+
+## here above we need the --dedup option to be in fastp, fastp just needs to be the right version first. above version 22 
+
+rule fastp_preprocess_ss:
+    """
+    Preprocess single-end reads with fastp.
+    Performs deduplication and quality filtering.
+    """
+    input:
+        fastq = config.get('input_fastq', ''),
+        flag = f"{config['output_dir']}/flags/ss_reads_checked.flag"
+    output:
+        filtered = temp(f"{config['output_dir']}/preprocessed/{config['sample_name']}-filtered.fastq") if not config.get('keep_temp') else f"{config['output_dir']}/preprocessed/{config['sample_name']}-filtered.fastq",
+        json = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.json",
+        html = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.html"
+    threads:
+        config['threads']
+    params:
+        min_quality = config['min_quality'],
+        min_length = config['min_length']
+    log:
+        f"{config['output_dir']}/logs/fastp_preprocess.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/preprocessed {config[output_dir]}/logs
+        {config[fastp]} -g -j {output.json} -h {output.html} \
+            -i {input.fastq} -o {output.filtered} \
+            -V -w {threads} -q {params.min_quality} -l {params.min_length} \
+            2> {log}
+        """
+
+
+# ============================================================================
+# REFERENCE INDEXING RULES
+# ============================================================================
+
+rule index_reference:
+    """
+    Index reference genome for BWA and samtools faidx.
+    """
+    input:
+        ref = config['reference']
+    output:
+        amb = f"{config['reference']}.amb",
+        ann = f"{config['reference']}.ann",
+        bwt = f"{config['reference']}.bwt",
+        pac = f"{config['reference']}.pac",
+        sa = f"{config['reference']}.sa",
+        fai = f"{config['reference']}.fai"
+    log:
+        f"{config['output_dir']}/logs/bwa_index_reference.log"
+    shell:
+        """
+        # Create samtools faidx index
+        if [ ! -f {output.fai} ]; then
+            echo "Creating samtools faidx index..." > {log}
+            {config[samtools]} faidx {input.ref} 2>> {log}
+        fi
+        
+        # Create BWA indices
+        if [ ! -f {output.bwt} ]; then
+            echo "Creating BWA indices..." >> {log}
+            {config[bwa]} index {input.ref} 2>> {log}
+        else
+            echo "Reference already indexed" >> {log}
+        fi
+        """
+
+
+# ============================================================================
+# ALIGNMENT RULES
+# ============================================================================
+
+rule bwa_align_ds:
+    """
+    Align preprocessed paired-end reads to reference genome using BWA aln.
+    IMPORTANT: Minimum alignment quality is set to 0 to retain multi-mapping reads.
+    """
+    input:
+        fastq = f"{config['output_dir']}/preprocessed/{config['sample_name']}-merged.fastq",
+        ref = config['reference'],
+        index = f"{config['reference']}.bwt"
+    output:
+        bam = temp(f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam") if not config.get('keep_temp') else f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam"
+    threads:
+        config['threads']
+    params:
+        seed_len = config['bwa_seed_length'],
+        max_gap = config['bwa_max_gap_opens'],
+        mismatch = config['bwa_mismatch_penalty']
+    log:
+        f"{config['output_dir']}/logs/bwa_align.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/alignment
+        {config[bwa]} aln -l {params.seed_len} -o {params.max_gap} -n {params.mismatch} \
+            -t {threads} {input.ref} {input.fastq} 2> {log} | \
+        {config[bwa]} samse {input.ref} - {input.fastq} 2>> {log} | \
+        {config[samtools]} view -F 4 -@ {threads} -uS - | \
+        {config[samtools]} sort -@ {threads} -o {output.bam} 2>> {log}
+        """
+
+
+rule bwa_align_ss:
+    """
+    Align preprocessed single-end reads to reference genome using BWA aln.
+    IMPORTANT: Minimum alignment quality is set to 0 to retain multi-mapping reads.
+    """
+    input:
+        fastq = f"{config['output_dir']}/preprocessed/{config['sample_name']}-filtered.fastq",
+        ref = config['reference'],
+        index = f"{config['reference']}.bwt"
+    output:
+        bam = temp(f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam") if not config.get('keep_temp') else f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam"
+    threads:
+        config['threads']
+    params:
+        seed_len = config['bwa_seed_length'],
+        max_gap = config['bwa_max_gap_opens'],
+        mismatch = config['bwa_mismatch_penalty']
+    log:
+        f"{config['output_dir']}/logs/bwa_align.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/alignment
+        {config[bwa]} aln -l {params.seed_len} -o {params.max_gap} -n {params.mismatch} \
+            -t {threads} {input.ref} {input.fastq} 2> {log} | \
+        {config[bwa]} samse {input.ref} - {input.fastq} 2>> {log} | \
+        {config[samtools]} view -F 4 -@ {threads} -uS - | \
+        {config[samtools]} sort -@ {threads} -o {output.bam} 2>> {log}
+        """
+
+
+# ============================================================================
+# BAM FILE CLEANUP AND PROCESSING
+# ============================================================================
+
+rule bam_cleanup:
+    """
+    Process aligned BAM file: remove duplicates, sort, and index.
+    For user-provided BAM files, this is the entry point.
+    """
+    input:
+        bam = lambda wildcards: config.get('input_bam', '') if config['input_type'] == 'bam' 
+              else f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam"
+    output:
+        rmdup = temp(f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.bam") if not config.get('keep_temp') else f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.bam",
+        sorted = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam",
+        bai = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam.bai"
+    threads:
+        config['threads']
+    log:
+        f"{config['output_dir']}/logs/bam_cleanup.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/processed
+        
+        # Remove duplicates
+        {config[samtools]} rmdup -S {input.bam} {output.rmdup} 2> {log}
+        
+        # Sort
+        {config[samtools]} sort -@ {threads} {output.rmdup} -o {output.sorted} 2>> {log}
+        
+        # Index
+        {config[samtools]} index {output.sorted} 2>> {log}
+        """
+
+
+rule bam_statistics:
+    """
+    Calculate mapping statistics from BAM file.
+    """
+    input:
+        bam = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam"
+    output:
+        stats = f"{config['output_dir']}/stats/{config['sample_name']}_mapping_stats.txt"
+    threads:
+        config['threads']
+    log:
+        f"{config['output_dir']}/logs/bam_stats.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/stats
+        
+        echo "Mapping Statistics" > {output.stats}
+        echo "==================" >> {output.stats}
+        echo "" >> {output.stats}
+        
+        echo "Total mapped reads:" >> {output.stats}
+        {config[samtools]} view -c {input.bam} >> {output.stats}
+        
+        echo "" >> {output.stats}
+        echo "Coverage and depth:" >> {output.stats}
+        {config[samtools]} depth -a {input.bam} | \
+            awk '{{sum+=$3;cnt++}}END{{print "Average depth: " sum/cnt "\\nTotal bases mapped: " sum}}' \
+            >> {output.stats}
+        
+        echo "" >> {output.stats}
+        echo "Mapping quality distribution:" >> {output.stats}
+        {config[samtools]} view {input.bam} | cut -f5 | sort -n | uniq -c >> {output.stats}
+        """
+
+
+# ============================================================================
+# MITOCHONDRIAL FILTERING RULES
+# ============================================================================
+
+rule filter_mitochondrial_mappings:
+    """
+    Filter BAM file to retain only reads that map at least once to mitochondrial scaffold(s).
+    Uses awk for fast lookup of mitochondrial scaffold names in BAM file.
+    """
+    input:
+        bam = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam"
+    output:
+        filtered_bam = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.bam",
+        filtered_bai = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.bam.bai"
+    params:
+        mt_scaffolds = config['mt_scaffolds'],
+        mt_pattern = lambda wildcards: '|'.join([f"{s}," for s in config['mt_scaffolds']])
+    threads:
+        config['threads']
+    log:
+        f"{config['output_dir']}/logs/filter_mt.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/filtered
+        
+        echo "Filtering for mitochondrial mappings..." > {log}
+        echo "MT scaffolds: {params.mt_scaffolds}" >> {log}
+        
+        # Extract header
+        {config[samtools]} view -H {input.bam} > {config[output_dir]}/filtered/temp_header.sam
+        
+        # Filter reads that map to MT scaffold (primary or secondary)
+        # This checks both the reference column (field 3) and the XA tag for secondary alignments
+        {config[samtools]} view {input.bam} | \
+            awk -v mt="{params.mt_pattern}" \
+            'BEGIN {{OFS="\\t"}} {{
+                # Check if primary alignment is to MT (field 3 matches exactly)
+                for (i=1; i<=split("{params.mt_scaffolds}", scaffolds, " "); i++) {{
+                    if ($3 == scaffolds[i]) {{
+                        print $0
+                        next
+                    }}
+                }}
+                # Check XA tag for secondary alignments to MT
+                for (i=12; i<=NF; i++) {{
+                    if ($i ~ /^XA:Z:/) {{
+                        if ($i ~ mt) {{
+                            print $0
+                            break
+                        }}
+                    }}
+                }}
+            }}' >> {config[output_dir]}/filtered/temp_mt_reads.sam 2>> {log}
+        
+        # Combine header and filtered reads, convert to BAM
+        cat {config[output_dir]}/filtered/temp_header.sam \
+            {config[output_dir]}/filtered/temp_mt_reads.sam | \
+            {config[samtools]} view -@ {threads} -b -o {output.filtered_bam} 2>> {log}
+        
+        # Index the filtered BAM
+        {config[samtools]} index {output.filtered_bam} 2>> {log}
+        
+        # Clean up temp files
+        rm {config[output_dir]}/filtered/temp_header.sam \
+           {config[output_dir]}/filtered/temp_mt_reads.sam
+        
+        # Report statistics
+        echo "" >> {log}
+        echo "Filtered BAM statistics:" >> {log}
+        {config[samtools]} view -c {output.filtered_bam} >> {log}
+        """
+
+
+# ============================================================================
+# NUMTS IDENTIFICATION RULES
+# ============================================================================
+
+rule bam_to_text:
+    """
+    Convert filtered BAM to text format for Python processing.
+    """
+    input:
+        bam = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.bam"
+    output:
+        txt = temp(f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.txt") if not config.get('keep_temp') else f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.txt"
+    threads:
+        config['threads']
+    log:
+        f"{config['output_dir']}/logs/bam_to_text.log"
+    shell:
+        """
+        {config[samtools]} view {input.bam} > {output.txt} 2> {log}
+        """
+
+
+rule identify_numts:
+    """
+    Run FragmentsMappingTwicePY.py to identify NUMTS sequences.
+    Splits output into records file (first 4 lines) and numts list (remaining lines).
+    """
+    input:
+        txt = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.txt"
+    output:
+        numts = f"{config['output_dir']}/numts.txt",
+        records = f"{config['output_dir']}/records_{config['mt_scaffolds'][0]}.txt"
+    params:
+        mt_scaffold = config['mt_scaffolds'][0],  # Use first MT scaffold as primary
+        script_dir = config['script_dir']
+    log:
+        f"{config['output_dir']}/logs/identify_numts.log"
+    shell:
+        """
+        # Run the Python script and capture all output
+        python3 {params.script_dir}/FragmentsMappingTwicePY.py \
+            {input.txt} {params.mt_scaffold} > {config[output_dir]}/temp_numts_output.txt 2> {log}
+        
+        # Split output: first 4 lines go to records, rest to numts
+        head -n 4 {config[output_dir]}/temp_numts_output.txt > {output.records}
+        tail -n +5 {config[output_dir]}/temp_numts_output.txt > {output.numts}
+        
+        # Clean up temp file
+        rm {config[output_dir]}/temp_numts_output.txt
+        
+        # Report statistics
+        echo "NUMTS identification complete" >> {log}
+        echo "Number of NUMTS found: $(wc -l < {output.numts})" >> {log}
+        """
+
+
+# ============================================================================
+# OPTIONAL REMAPPING RULES
+# ============================================================================
+
+rule bam_to_fastq:
+    """
+    Convert filtered BAM to FASTQ format for remapping.
+    Only runs if --remap option is specified.
+    """
+    input:
+        bam = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.bam"
+    output:
+        fastq = temp(f"{config['output_dir']}/remapping/{config['sample_name']}_mt_filtered.fq") if not config.get('keep_temp') else f"{config['output_dir']}/remapping/{config['sample_name']}_mt_filtered.fq"
+    threads:
+        config['threads']
+    log:
+        f"{config['output_dir']}/logs/bam_to_fastq.log"
+    shell:
+        """
+        mkdir -p {config[output_dir]}/remapping
+        
+        # Convert BAM to FASTQ
+        {config[samtools]} fastq {input.bam} > {output.fastq} 2> {log}
+        """
+
+
+rule recover_sequences:
+    """
+    Remove NUMTS sequences from FASTQ to create recovered sequences file.
+    Only runs if --remap option is specified.
+    """
+    input:
+        fastq = f"{config['output_dir']}/remapping/{config['sample_name']}_mt_filtered.fq",
+        numts = f"{config['output_dir']}/numts.txt"
+    output:
+        recovered = temp(f"{config['output_dir']}/remapping/recovered_sequences.fq") if not config.get('keep_temp') else f"{config['output_dir']}/remapping/recovered_sequences.fq"
+    log:
+        f"{config['output_dir']}/logs/recover_sequences.log"
+    shell:
+        """
+        # Use Python to accurately filter FASTQ based on exact read ID matching
+        python3 - {input.fastq} {input.numts} {output.recovered} > {log} 2>&1 << 'PYTHON_EOF'
+import sys
+import re
+
+fastq_file = sys.argv[1]
+numts_file = sys.argv[2]
+output_file = sys.argv[3]
+
+# Read NUMTS IDs into a set for efficient lookup
+numts_ids = set()
+with open(numts_file, 'r') as f:
+    for line in f:
+        numts_ids.add(line.strip())
+
+print(f"Loaded {{len(numts_ids)}} NUMTS IDs to exclude")
+
+# Filter FASTQ file
+recovered_count = 0
+original_count = 0
+
+with open(fastq_file, 'r') as infile, open(output_file, 'w') as outfile:
+    while True:
+        header = infile.readline()
+        if not header:
+            break
+        
+        seq = infile.readline()
+        plus = infile.readline()
+        qual = infile.readline()
+        
+        original_count += 1
+        
+        # Extract read ID (remove @ prefix)
+        read_id = header.rstrip()[1:]
+        
+        # Keep read if it's NOT in the NUMTS list
+        if read_id not in numts_ids:
+            outfile.write(header)
+            outfile.write(seq)
+            outfile.write(plus)
+            outfile.write(qual)
+            recovered_count += 1
+
+print(f"Recovered sequences extracted")
+print(f"Original reads: {{original_count}}")
+print(f"Recovered reads: {{recovered_count}}")
+print(f"Removed {{original_count - recovered_count}} NUMTS")
+PYTHON_EOF
+        """
+
+
+rule extract_mitochondrial_genome:
+    """
+    Extract mitochondrial genome sequence from reference for remapping.
+    Only runs if --remap option is specified.
+    """
+    input:
+        ref = config['reference'],
+        ref_index = f"{config['reference']}.fai"
+    output:
+        mt_genome = temp(f"{config['output_dir']}/remapping/mt_genome.fasta") if not config.get('keep_temp') else f"{config['output_dir']}/remapping/mt_genome.fasta"
+    params:
+        mt_scaffolds = config['mt_scaffolds']
+    log:
+        f"{config['output_dir']}/logs/extract_mt_genome.log"
+    shell:
+        """
+        # Extract mitochondrial scaffold(s) from reference
+        # Reference must already be indexed (done by index_reference rule)
+        for scaffold in {params.mt_scaffolds}; do
+            {config[samtools]} faidx {input.ref} $scaffold >> {output.mt_genome} 2>> {log}
+        done
+        
+        echo "Mitochondrial genome extracted" >> {log}
+        """
+
+
+rule index_mitochondrial_genome:
+    """
+    Index mitochondrial genome for BWA remapping.
+    Only runs if --remap option is specified.
+    """
+    input:
+        mt_genome = f"{config['output_dir']}/remapping/mt_genome.fasta"
+    output:
+        amb = f"{config['output_dir']}/remapping/mt_genome.fasta.amb",
+        ann = f"{config['output_dir']}/remapping/mt_genome.fasta.ann",
+        bwt = f"{config['output_dir']}/remapping/mt_genome.fasta.bwt",
+        pac = f"{config['output_dir']}/remapping/mt_genome.fasta.pac",
+        sa = f"{config['output_dir']}/remapping/mt_genome.fasta.sa",
+        fai = f"{config['output_dir']}/remapping/mt_genome.fasta.fai"
+    log:
+        f"{config['output_dir']}/logs/index_mt_genome.log"
+    shell:
+        """
+        # Remove any existing indices to force re-indexing
+        rm -f {output.amb} {output.ann} {output.bwt} {output.pac} {output.sa} {output.fai}
+        
+        echo "Indexing mitochondrial genome..." > {log}
+        
+        # Index with samtools faidx for sequence extraction
+        {config[samtools]} faidx {input.mt_genome} 2>> {log}
+        
+        # Index with BWA for alignment
+        {config[bwa]} index {input.mt_genome} 2>> {log}
+        
+        echo "Mitochondrial genome indexed successfully" >> {log}
+        """
+
+
+rule remap_recovered_sequences:
+    """
+    Remap recovered sequences to mitochondrial genome only.
+    Uses higher mapping quality threshold (default 20).
+    Only runs if --remap option is specified.
+    """
+    input:
+        fastq = f"{config['output_dir']}/remapping/recovered_sequences.fq",
+        mt_genome = f"{config['output_dir']}/remapping/mt_genome.fasta",
+        index = f"{config['output_dir']}/remapping/mt_genome.fasta.bwt"
+    output:
+        bam = f"{config['output_dir']}/{config['sample_name']}_recovered.bam",
+        bai = f"{config['output_dir']}/{config['sample_name']}_recovered.bam.bai"
+    threads:
+        config['threads']
+    params:
+        seed_len = config['bwa_seed_length'],
+        max_gap = config['bwa_max_gap_opens'],
+        mismatch = config['bwa_mismatch_penalty'],
+        min_qual = config['remap_quality']
+    log:
+        f"{config['output_dir']}/logs/remap_recovered.log"
+    shell:
+        """
+        echo "Remapping recovered sequences to mitochondrial genome..." > {log}
+        
+        # Map with BWA aln, filter for quality >= {params.min_qual}
+        {config[bwa]} aln -l {params.seed_len} -o {params.max_gap} -n {params.mismatch} \
+            -t {threads} {input.mt_genome} {input.fastq} 2>> {log} | \
+        {config[bwa]} samse {input.mt_genome} - {input.fastq} 2>> {log} | \
+        {config[samtools]} view -F 4 -q {params.min_qual} -@ {threads} -b - | \
+        {config[samtools]} sort -@ {threads} -o {output.bam} 2>> {log}
+        
+        # Index the remapped BAM
+        {config[samtools]} index {output.bam} 2>> {log}
+        
+        # Report statistics
+        echo "" >> {log}
+        echo "Remapping statistics:" >> {log}
+        echo "Reads remapped: $({config[samtools]} view -c {output.bam})" >> {log}
+        echo "Average depth: $({config[samtools]} depth {output.bam} | awk '{{sum+=$3;n++}}END{{print sum/n}}')" >> {log}
+        """
+
+
+# ============================================================================
+# DUMMY RULES FOR FUTURE EXPANSION
+# ============================================================================
+
+rule dummy_quality_control:
+    """
+    Placeholder for additional quality control steps.
+    """
+    input:
+        bam = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam"
+    output:
+        flag = temp(f"{config['output_dir']}/flags/qc_done.flag")
+    shell:
+        """
+        # Future: Add FastQC, MultiQC, or custom QC here
+        echo "Quality control step - placeholder" > {output.flag}
+        """
+
+
+rule dummy_damage_analysis:
+    """
+    Placeholder for damage pattern analysis (e.g., mapDamage).
+    """
+    input:
+        bam = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam"
+    output:
+        flag = temp(f"{config['output_dir']}/flags/damage_done.flag")
+    shell:
+        """
+        # Future: Add mapDamage or similar tool here
+        echo "Damage analysis step - placeholder" > {output.flag}
+        """
+
+
+rule dummy_visualization:
+    """
+    Placeholder for visualization of NUMTS locations.
+    """
+    input:
+        numts = f"{config['output_dir']}/numts.txt"
+    output:
+        flag = temp(f"{config['output_dir']}/flags/viz_done.flag")
+    shell:
+        """
+        # Future: Generate plots of NUMTS distribution, coverage, etc.
+        echo "Visualization step - placeholder" > {output.flag}
+        """

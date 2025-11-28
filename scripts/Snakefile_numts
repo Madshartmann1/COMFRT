@@ -18,7 +18,10 @@ def get_final_outputs(config):
     # Always produce these outputs
     mt_tag = config['mt_scaffolds'][0]
     outputs.append(f"{config['output_dir']}/numts.txt")
-    outputs.append(f"{config['output_dir']}/records_{mt_tag}.txt")
+    outputs.append(f"{config['output_dir']}/records/{mt_tag}_records.txt")
+    
+    # Final consolidated records file
+    outputs.append(f"{config['output_dir']}/records/records_final.txt")
     
     # Optional remapping endpoint
     if config.get('remap', False):
@@ -26,6 +29,31 @@ def get_final_outputs(config):
         outputs.append(f"{config['output_dir']}/{config['sample_name']}_recovered.bam.bai")
     
     return outputs
+
+
+def get_available_record_files(wildcards):
+    """Determine which record files should exist based on pipeline configuration."""
+    records_dir = f"{config['output_dir']}/records"
+    record_files = []
+    
+    # Preprocessing and alignment records (conditional on input type)
+    if config['input_type'] == 'ds':
+        record_files.append(f"{records_dir}/preprocessing_readsDS_records.txt")
+        record_files.append(f"{records_dir}/align_readsDS_records.txt")
+    elif config['input_type'] == 'ss':
+        record_files.append(f"{records_dir}/preprocessing_readsSS_records.txt")
+        record_files.append(f"{records_dir}/align_readsSS_records.txt")
+    
+    # Always present records
+    record_files.append(f"{records_dir}/bam_cleanup_records.txt")
+    record_files.append(f"{records_dir}/filter_MT_mappings_records.txt")
+    record_files.append(f"{records_dir}/{config['mt_scaffolds'][0]}_records.txt")
+    
+    # Remapping records (conditional on --remap flag)
+    if config.get('remap', False):
+        record_files.append(f"{records_dir}/remap_records.txt")
+    
+    return record_files
 
 
 # Define final rule
@@ -91,7 +119,8 @@ rule fastp_preprocess_ds:
     output:
         merged = temp(f"{config['output_dir']}/preprocessed/{config['sample_name']}-merged.fastq") if not config.get('keep_temp') else f"{config['output_dir']}/preprocessed/{config['sample_name']}-merged.fastq",
         json = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.json",
-        html = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.html"
+        html = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.html",
+        records = f"{config['output_dir']}/records/preprocessing_readsDS_records.txt"
     threads:
         config['threads']
     params:
@@ -101,12 +130,26 @@ rule fastp_preprocess_ds:
         f"{config['output_dir']}/logs/fastp_preprocess.log"
     shell:
         """
-        mkdir -p {config[output_dir]}/preprocessed {config[output_dir]}/logs
+        mkdir -p {config[output_dir]}/preprocessed {config[output_dir]}/logs {config[output_dir]}/records
+        
+        # Count input reads
+        input_reads=$(( $(wc -l < {input.r1}) / 4 ))
+        
+        # Run fastp
         {config[fastp]} --dedup -g -j {output.json} -h {output.html} \
             -i {input.r1} -I {input.r2} \
             -V -w {threads} -q {params.min_quality} -l {params.min_length} \
             --merged_out {output.merged} -m \
             2> {log}
+        
+        # Count output reads
+        output_reads=$(( $(wc -l < {output.merged}) / 4 ))
+        
+        # Create records file
+        echo "Preprocessing Records (Paired-End)" > {output.records}
+        echo "==================================" >> {output.records}
+        echo "Input reads (R1): $input_reads" >> {output.records}
+        echo "Merged output reads: $output_reads" >> {output.records}
         """
 
 ## here above we need the --dedup option to be in fastp, fastp just needs to be the right version first. above version 22 
@@ -122,7 +165,8 @@ rule fastp_preprocess_ss:
     output:
         filtered = temp(f"{config['output_dir']}/preprocessed/{config['sample_name']}-filtered.fastq") if not config.get('keep_temp') else f"{config['output_dir']}/preprocessed/{config['sample_name']}-filtered.fastq",
         json = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.json",
-        html = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.html"
+        html = f"{config['output_dir']}/preprocessed/{config['sample_name']}_fastp.html",
+        records = f"{config['output_dir']}/records/preprocessing_readsSS_records.txt"
     threads:
         config['threads']
     params:
@@ -132,11 +176,25 @@ rule fastp_preprocess_ss:
         f"{config['output_dir']}/logs/fastp_preprocess.log"
     shell:
         """
-        mkdir -p {config[output_dir]}/preprocessed {config[output_dir]}/logs
-        {config[fastp]} -g -j {output.json} -h {output.html} \
+        mkdir -p {config[output_dir]}/preprocessed {config[output_dir]}/logs {config[output_dir]}/records
+        
+        # Count input reads
+        input_reads=$(( $(wc -l < {input.fastq}) / 4 ))
+        
+        # Run fastp
+        {config[fastp]} --dedup -g -j {output.json} -h {output.html} \
             -i {input.fastq} -o {output.filtered} \
             -V -w {threads} -q {params.min_quality} -l {params.min_length} \
             2> {log}
+        
+        # Count output reads
+        output_reads=$(( $(wc -l < {output.filtered}) / 4 ))
+        
+        # Create records file
+        echo "Preprocessing Records (Single-End)" > {output.records}
+        echo "==================================" >> {output.records}
+        echo "Input reads: $input_reads" >> {output.records}
+        echo "Filtered output reads: $output_reads" >> {output.records}
         """
 
 
@@ -189,9 +247,11 @@ rule bwa_align_ds:
     input:
         fastq = f"{config['output_dir']}/preprocessed/{config['sample_name']}-merged.fastq",
         ref = config['reference'],
-        index = f"{config['reference']}.bwt"
+        index = f"{config['reference']}.bwt",
+        preprocess_records = f"{config['output_dir']}/records/preprocessing_readsDS_records.txt"
     output:
-        bam = temp(f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam") if not config.get('keep_temp') else f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam"
+        bam = temp(f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam") if not config.get('keep_temp') else f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam",
+        records = f"{config['output_dir']}/records/align_readsDS_records.txt"
     threads:
         config['threads']
     params:
@@ -202,12 +262,22 @@ rule bwa_align_ds:
         f"{config['output_dir']}/logs/bwa_align.log"
     shell:
         """
-        mkdir -p {config[output_dir]}/alignment
+        mkdir -p {config[output_dir]}/alignment {config[output_dir]}/records
+        
+        # Align reads
         {config[bwa]} aln -l {params.seed_len} -o {params.max_gap} -n {params.mismatch} \
             -t {threads} {input.ref} {input.fastq} 2> {log} | \
         {config[bwa]} samse {input.ref} - {input.fastq} 2>> {log} | \
         {config[samtools]} view -F 4 -@ {threads} -uS - | \
         {config[samtools]} sort -@ {threads} -o {output.bam} 2>> {log}
+        
+        # Count aligned reads
+        aligned_reads=$({config[samtools]} view -c {output.bam})
+        
+        # Create records file
+        echo "Alignment Records (Paired-End)" > {output.records}
+        echo "============================" >> {output.records}
+        echo "Aligned reads: $aligned_reads" >> {output.records}
         """
 
 
@@ -219,9 +289,11 @@ rule bwa_align_ss:
     input:
         fastq = f"{config['output_dir']}/preprocessed/{config['sample_name']}-filtered.fastq",
         ref = config['reference'],
-        index = f"{config['reference']}.bwt"
+        index = f"{config['reference']}.bwt",
+        preprocess_records = f"{config['output_dir']}/records/preprocessing_readsSS_records.txt"
     output:
-        bam = temp(f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam") if not config.get('keep_temp') else f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam"
+        bam = temp(f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam") if not config.get('keep_temp') else f"{config['output_dir']}/alignment/{config['sample_name']}.sort.bam",
+        records = f"{config['output_dir']}/records/align_readsSS_records.txt"
     threads:
         config['threads']
     params:
@@ -232,12 +304,22 @@ rule bwa_align_ss:
         f"{config['output_dir']}/logs/bwa_align.log"
     shell:
         """
-        mkdir -p {config[output_dir]}/alignment
+        mkdir -p {config[output_dir]}/alignment {config[output_dir]}/records
+        
+        # Align reads
         {config[bwa]} aln -l {params.seed_len} -o {params.max_gap} -n {params.mismatch} \
             -t {threads} {input.ref} {input.fastq} 2> {log} | \
         {config[bwa]} samse {input.ref} - {input.fastq} 2>> {log} | \
         {config[samtools]} view -F 4 -@ {threads} -uS - | \
         {config[samtools]} sort -@ {threads} -o {output.bam} 2>> {log}
+        
+        # Count aligned reads
+        aligned_reads=$({config[samtools]} view -c {output.bam})
+        
+        # Create records file
+        echo "Alignment Records (Single-End)" > {output.records}
+        echo "=============================" >> {output.records}
+        echo "Aligned reads: $aligned_reads" >> {output.records}
         """
 
 
@@ -256,14 +338,15 @@ rule bam_cleanup:
     output:
         rmdup = temp(f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.bam") if not config.get('keep_temp') else f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.bam",
         sorted = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam",
-        bai = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam.bai"
+        bai = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam.bai",
+        records = f"{config['output_dir']}/records/bam_cleanup_records.txt"
     threads:
         config['threads']
     log:
         f"{config['output_dir']}/logs/bam_cleanup.log"
     shell:
         """
-        mkdir -p {config[output_dir]}/processed
+        mkdir -p {config[output_dir]}/processed {config[output_dir]}/records
         
         # Remove duplicates
         {config[samtools]} rmdup -S {input.bam} {output.rmdup} 2> {log}
@@ -273,6 +356,14 @@ rule bam_cleanup:
         
         # Index
         {config[samtools]} index {output.sorted} 2>> {log}
+        
+        # Count reads
+        cleaned_reads=$({config[samtools]} view -c {output.sorted})
+        
+        # Create records file
+        echo "BAM Cleanup Records" > {output.records}
+        echo "==================" >> {output.records}
+        echo "Cleaned reads (duplicates removed): $cleaned_reads" >> {output.records}
         """
 
 
@@ -321,10 +412,12 @@ rule filter_mitochondrial_mappings:
     Uses awk for fast lookup of mitochondrial scaffold names in BAM file.
     """
     input:
-        bam = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam"
+        bam = f"{config['output_dir']}/processed/{config['sample_name']}.rmdup.sort.bam",
+        cleanup_records = f"{config['output_dir']}/records/bam_cleanup_records.txt"
     output:
         filtered_bam = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.bam",
-        filtered_bai = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.bam.bai"
+        filtered_bai = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.bam.bai",
+        records = f"{config['output_dir']}/records/filter_MT_mappings_records.txt"
     params:
         mt_scaffolds = config['mt_scaffolds'],
         mt_pattern = lambda wildcards: '|'.join([f"{s}," for s in config['mt_scaffolds']])
@@ -377,10 +470,25 @@ rule filter_mitochondrial_mappings:
         rm {config[output_dir]}/filtered/temp_header.sam \
            {config[output_dir]}/filtered/temp_mt_reads.sam
         
-        # Report statistics
+        # Count filtered reads
+        filtered_reads=$({config[samtools]} view -c {output.filtered_bam})
+        
+        # Calculate average depth on MT scaffold
+        mt_scaffold="{params.mt_scaffolds}"
+        avg_depth=$({config[samtools]} depth -a -g SECONDARY,SUPPLEMENTARY -r {params.mt_scaffolds} {output.filtered_bam} | awk '{{sum+=$3; count++}} END {{if(count>0) print sum/count; else print 0}}')
+        
+        # Create records file
+        mkdir -p {config[output_dir]}/records
+        echo \"Filter MT Mappings Records\" > {output.records}
+        echo \"==========================\" >> {output.records}
+        echo \"Reads that map at least once to the mitogenome: $filtered_reads\" >> {output.records}
+        echo \"Average depth on the mitogenome: $avg_depth\" >> {output.records}
+
+        # Report statistics to log
         echo "" >> {log}
         echo "Filtered BAM statistics:" >> {log}
-        {config[samtools]} view -c {output.filtered_bam} >> {log}
+        echo "Filtered reads: $filtered_reads" >> {log}
+        echo "Average depth on MT scaffold: $avg_depth" >> {log}
         """
 
 
@@ -412,10 +520,11 @@ rule identify_numts:
     Splits output into records file (first 4 lines) and numts list (remaining lines).
     """
     input:
-        txt = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.txt"
+        txt = f"{config['output_dir']}/filtered/{config['sample_name']}_mt_filtered.txt",
+        filter_records = f"{config['output_dir']}/records/filter_MT_mappings_records.txt"
     output:
         numts = f"{config['output_dir']}/numts.txt",
-        records = f"{config['output_dir']}/records_{config['mt_scaffolds'][0]}.txt"
+        records = f"{config['output_dir']}/records/{config['mt_scaffolds'][0]}_records.txt"
     params:
         mt_scaffold = config['mt_scaffolds'][0],  # Use first MT scaffold as primary
         script_dir = config['script_dir']
@@ -423,6 +532,8 @@ rule identify_numts:
         f"{config['output_dir']}/logs/identify_numts.log"
     shell:
         """
+        mkdir -p {config[output_dir]}/records
+        
         # Run the Python script and capture all output
         python3 {params.script_dir}/FragmentsMappingTwicePY.py \
             {input.txt} {params.mt_scaffold} > {config[output_dir]}/temp_numts_output.txt 2> {log}
@@ -603,14 +714,16 @@ rule remap_recovered_sequences:
         index = f"{config['output_dir']}/remapping/mt_genome.fasta.bwt"
     output:
         bam = f"{config['output_dir']}/{config['sample_name']}_recovered.bam",
-        bai = f"{config['output_dir']}/{config['sample_name']}_recovered.bam.bai"
+        bai = f"{config['output_dir']}/{config['sample_name']}_recovered.bam.bai",
+        records = f"{config['output_dir']}/records/remap_records.txt"
     threads:
         config['threads']
     params:
         seed_len = config['bwa_seed_length'],
         max_gap = config['bwa_max_gap_opens'],
         mismatch = config['bwa_mismatch_penalty'],
-        min_qual = config['remap_quality']
+        min_qual = config['remap_quality'],
+        mt_scaffold = config['mt_scaffolds'][0]
     log:
         f"{config['output_dir']}/logs/remap_recovered.log"
     shell:
@@ -627,11 +740,73 @@ rule remap_recovered_sequences:
         # Index the remapped BAM
         {config[samtools]} index {output.bam} 2>> {log}
         
-        # Report statistics
+        # Count remapped reads
+        remapped_reads=$({config[samtools]} view -c {output.bam})
+        
+        # Calculate average depth on MT scaffold
+        avg_depth=$({config[samtools]} depth -a {output.bam} | awk '{{sum+=$3; count++}} END {{if(count>0) print sum/count; else print 0}}')
+        
+        # Create records file
+        mkdir -p {config[output_dir]}/records
+        echo "Remap Records" > {output.records}
+        echo "=============" >> {output.records}
+        echo "Reads remapped with mapping quality above 20: $remapped_reads" >> {output.records}
+        echo "Average depth of true mitochondrial reads (including recovered reads): $avg_depth" >> {output.records}
+        
+        # Report statistics to log
         echo "" >> {log}
         echo "Remapping statistics:" >> {log}
-        echo "Reads remapped: $({config[samtools]} view -c {output.bam})" >> {log}
-        echo "Average depth: $({config[samtools]} depth {output.bam} | awk '{{sum+=$3;n++}}END{{print sum/n}}')" >> {log}
+        echo "Reads remapped: $remapped_reads" >> {log}
+        echo "Average depth: $avg_depth" >> {log}
+        """
+
+
+# ============================================================================
+# COLLECT RECORDS RULE
+# ============================================================================
+
+rule collect_records:
+    """
+    Collect all individual record files into a final consolidated records file.
+    Keeps individual record files for reference.
+    """
+    input:
+        get_available_record_files
+    output:
+        final_records = f"{config['output_dir']}/records/records_final.txt"
+    log:
+        f"{config['output_dir']}/logs/collect_records.log"
+    shell:
+        """
+        echo "Collecting all record files..." > {log}
+        
+        # Create final records file header
+        echo "========================================" > {output.final_records}
+        echo "NUMTS Pipeline - Final Records Summary" >> {output.final_records}
+        echo "========================================" >> {output.final_records}
+        echo "" >> {output.final_records}
+        echo "Generated: $(date)" >> {output.final_records}
+        echo "Sample: {config[sample_name]}" >> {output.final_records}
+        echo "" >> {output.final_records}
+        echo "========================================" >> {output.final_records}
+        echo "" >> {output.final_records}
+        
+        # Concatenate all individual record files
+        for record_file in {input}; do
+            echo "" >> {output.final_records}
+            echo "File: $(basename $record_file)" >> {output.final_records}
+            echo "----------------------------------------" >> {output.final_records}
+            cat $record_file >> {output.final_records}
+            echo "" >> {output.final_records}
+            echo "Collected: $record_file" >> {log}
+        done
+        
+        echo "" >> {output.final_records}
+        echo "========================================" >> {output.final_records}
+        echo "End of Records Summary" >> {output.final_records}
+        echo "========================================" >> {output.final_records}
+        
+        echo "All records collected successfully" >> {log}
         """
 
 

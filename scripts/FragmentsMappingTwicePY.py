@@ -72,7 +72,7 @@ def findingNUMTs(content, mt_scaffold):
         else:
             pass
 
-    records = [{'No. of sequences binding only to the MT genome': len(mapping_mt), 'No. of sequences binding once to the MT and once or more to the nuclear genome': len(mapping_mt_nucl)}]
+    records = [{'Reads that map only to the mitogenome': len(mapping_mt), 'Reads that map once to the mitogenome and at least once to the nuclear genome': len(mapping_mt_nucl)}]
     
     numts = []
     betterMT_thanNucl = []
@@ -109,8 +109,8 @@ def findingNUMTs(content, mt_scaffold):
         else:
             numts.append(line[0])
 
-    records.append({'No. of numts': len(numts)})
-    records.append({'No. of sequences mapping better to MT than to nucl': len(betterMT_thanNucl)})
+    records.append({'Reads that map better to the nuclear genome (numts)': len(numts)})
+    records.append({'Reads that map better or equal to the mitogenome than to the nuclear genome': len(betterMT_thanNucl)})
 
     return records, numts, betterMT_thanNucl
 

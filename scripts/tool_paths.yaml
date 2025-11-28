@@ -1,0 +1,19 @@
+# Tool paths configuration for NUMTS pipeline
+# Edit this file to provide full paths to tools not in your PATH
+# Then run the pipeline with: --fastp-path $(grep fastp tool_paths.yaml | awk '{print $2}')
+#
+# The following tools were NOT FOUND during validation:
+#   - BWA
+#   - samtools
+#   - fastp
+#
+# Format: Replace 'toolname' with the full path, e.g.:
+#   fastp: /usr/local/bin/fastp
+#   bwa: /home/user/software/bwa/bwa
+#   samtools: /opt/samtools-1.15/bin/samtools
+
+
+tool_paths:
+  fastp: /usr/bin/fastp
+  bwa: /usr/bin/bwa
+  samtools: /usr/bin/samtools

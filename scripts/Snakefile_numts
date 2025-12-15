@@ -475,20 +475,17 @@ rule filter_mitochondrial_mappings:
         
         # Calculate average depth on MT scaffold
         mt_scaffold="{params.mt_scaffolds}"
-        avg_depth=$({config[samtools]} depth -a -g SECONDARY,SUPPLEMENTARY -r {params.mt_scaffolds} {output.filtered_bam} | awk '{{sum+=$3; count++}} END {{if(count>0) print sum/count; else print 0}}')
         
         # Create records file
         mkdir -p {config[output_dir]}/records
         echo \"Filter MT Mappings Records\" > {output.records}
         echo \"==========================\" >> {output.records}
         echo \"Reads that map at least once to the mitogenome: $filtered_reads\" >> {output.records}
-        echo \"Average depth on the mitogenome: $avg_depth\" >> {output.records}
 
         # Report statistics to log
         echo "" >> {log}
         echo "Filtered BAM statistics:" >> {log}
         echo "Filtered reads: $filtered_reads" >> {log}
-        echo "Average depth on MT scaffold: $avg_depth" >> {log}
         """
 
 

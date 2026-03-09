@@ -1,368 +1,319 @@
-# NUMTS Recovery Pipeline
+# COmpetitively Mapped Fragment Recovery Tool (COMFRT)
+## Competitive Mapping Filter
 
-A Snakemake-based pipeline for identifying Nuclear Mitochondrial DNA segments (NUMTs) from sequencing data. This pipeline can process raw reads or pre-aligned BAM files to identify sequences that map to both mitochondrial and nuclear genomes.
+Recovers target-scaffold reads from a BAM aligned to a combined reference, using a single-pass competitive NM comparison.
 
-## Overview
+Originally written for NUMT (Nuclear Mitochondrial DNA) recovery from ancient DNA
+sequencing data, by Kirstine Tersbøl Melsen.
 
-This pipeline identifies NUMTs by detecting reads that map to both the mitochondrial genome and nuclear genome. It uses a Python wrapper script to configure and execute a Snakemake pipeline with multiple processing steps.
+---
 
-## Features
+## How it works
 
-- **Multiple input formats**: Accepts paired-end reads, single-end reads, or pre-aligned BAM files
-- **Automatic input detection**: Intelligently detects input type and adapts pipeline accordingly
-- **Quality control**: Integrated read preprocessing with fastp
-- **Flexible alignment**: Configurable BWA alignment parameters
-- **NUMTS identification**: Uses FragmentsMappingTwicePY.py to identify NUMTS sequences
-- **Optional remapping**: Can generate remapped BAM files of recovered (non-NUMTS) sequences
-- **Comprehensive logging**: Detailed logs for each processing step
+Reads are classified into two pools based on MAPQ:
+
+| Pool | Condition | Outcome |
+|------|-----------|---------|
+| **Unique** | MAPQ > threshold AND primary alignment on a target scaffold | Written to a cleaned BAM (non-target `@SQ` lines stripped) |
+| **Ambiguous** | MAPQ = 0 AND touches a target scaffold (primary or BWA `XA` tag) | Classified by competitive NM comparison (see below) |
+| Ignored | MAPQ = 0 AND does not touch any target scaffold | Dropped |
+
+**Competitive NM comparison** — for each ambiguous read, the best edit distance (NM) on
+target scaffolds is compared against the best NM on non-target scaffolds:
+
+```
+target NM  <  non-target NM  →  recovered  (target alignment is better)
+target NM  == non-target NM  →  tie        (kept — target is equally good)
+target NM  >  non-target NM  →  discarded  (non-target alignment is better)
+```
+
+
+> **IMPORTANT**: The input BAM must be aligned with BWA to a **combined reference**
+> containing both target and non-target scaffolds, and must **retain MAPQ=0 reads**.
+> Do not pre-filter with `samtools view -q` before running this script.
+> The BAM must be coordinate-sorted and indexed.
+
+---
 
 ## Requirements
 
-### Software Dependencies
-
-- Python 3.6+
-- Snakemake 5.0+
-- BWA
-- samtools
-- fastp (for read preprocessing)
-
-### Python Packages
+- Python 3.8+
+- [pysam](https://pysam.readthedocs.io/) >= 0.22
+- samtools (only used for indexing the output unique BAM)
 
 ```bash
-pip install pyyaml numpy pandas snakemake
+pip install pysam
 ```
 
-## Installation
-
-1. Clone or download this repository
-2. Ensure all dependencies are installed and in your PATH
-3. Make the wrapper script executable:
-
-```bash
-chmod +x numts_pipeline.py
-```
+---
 
 ## Usage
 
-### Basic Usage
-
-#### For paired-end reads:
-```bash
-./numts_pipeline.py \
-    -i /path/to/reads/directory/ \
-    -r /path/to/reference.fasta \
-    -m NC_010642.1 \
-    -o /path/to/output/
+```
+comfrt.py -i BAM (-s FILE | -r FILE) -o DIR [options]
 ```
 
-#### For pre-aligned BAM file:
-```bash
-./numts_pipeline.py \
-    -i /path/to/aligned.bam \
-    -r /path/to/reference.fasta \
-    -m NC_010642.1 \
-    -o /path/to/output/
-```
+### Single-reference mode
 
-### Advanced Usage with Custom Parameters
+One scaffold set, one output name prefix:
 
 ```bash
-./numts_pipeline.py \
-    -i /path/to/reads/ \
-    -r /path/to/reference.fasta \
-    -m NC_010642.1 \
-    -o /path/to/output/ \
-    -s tiger_sample \
-    -t 16 \
-    --min-quality 30 \
-    --min-length 35 \
-    --bwa-mismatch-penalty 0.03 \
-    --remap \
-    --remap-quality 25
+comfrt.py \
+    -i aligned.bam \
+    -s scaffolds.txt \
+    -o output/ \
+    -n OUTPUT_PREFIX \
+    -q 1 \
+    -t 16
 ```
 
-### With Multiple Mitochondrial Scaffolds
+### Multi-reference mode
+
+Multiple scaffold sets in a single BAM pass. The BAM is read **once** for all references:
 
 ```bash
-./numts_pipeline.py \
-    -i /path/to/reads/ \
-    -r /path/to/reference.fasta \
-    -m "NC_010642.1,MT_scaffold2" \
-    -o /path/to/output/
+comfrt.py \
+    -i aligned.bam \
+    -r refs.tsv \
+    -o output/ \
+    -t 16
 ```
 
-## Command-Line Arguments
+### Stats-only mode
 
-### Required Arguments
+Skip all BAM/FASTQ output — only write per-reference `_summary.txt` files.
+Useful before committing to a full run:
 
-| Argument | Description |
-|----------|-------------|
-| `-i, --input` | Input: BAM file, directory with FASTQ reads, or comma-separated R1,R2 files |
-| `-r, --reference` | Reference genome FASTA file (must contain mitochondrial scaffold) |
-| `-m, --mitochondrial-scaffold` | Name(s) of mitochondrial scaffold(s) in reference (comma-separated) |
-| `-o, --output-dir` | Output directory for results |
+```bash
+comfrt.py \
+    -i aligned.bam \
+    -r refs.tsv \
+    -o output/ \
+    --stats-only
+```
 
-### Optional Arguments
+---
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `-s, --sample-name` | "sample" | Sample name for output files |
-| `-t, --threads` | 4 | Total number of threads/cores to use |
+## Arguments
 
-### Preprocessing Options
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `-i / --input` | yes | Input BAM. Combined reference, coordinate-sorted, indexed, MAPQ=0 retained. |
+| `-s / --target-scaffolds` | one of `-s`/`-r` | Plain-text file of target scaffold names, one per line. Use `-n` to set output prefix. |
+| `-r / --references` | one of `-s`/`-r` | Two-column TSV: `scaffold_file_path  nickname`. One row per scaffold set. `#` lines ignored. |
+| `-o / --output-dir` | yes | Output directory. Created if absent. With `-r` (full output), one subfolder per reference. |
+| `-n / --sample-name` | no | Output filename prefix when using `-s` (default: `sample`). Ignored with `-r`. |
+| `--stats-only` | no | Write only `_summary.txt` files; skip BAM/FASTQ output entirely. |
+| `-q / --mapq-threshold` | no | Reads with MAPQ **strictly greater than** this go to the unique BAM. Default: `0` (MAPQ ≥ 1 → unique). |
+| `-t / --threads` | no | Threads for pysam and samtools (default: `4`). |
+| `--samtools` | no | Path to samtools executable (default: `samtools`). |
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--min-quality` | 25 | Minimum quality score for fastp (-q parameter) |
-| `--min-length` | 30 | Minimum read length for fastp (-l parameter) |
+### `-r` / `--references` file format
 
-### BWA Alignment Options
+Tab or space separated, `#` comments allowed:
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--bwa-seed-length` | 999 | BWA seed length (-l parameter) |
-| `--bwa-max-gap-opens` | 2 | BWA maximum gap opens (-o parameter) |
-| `--bwa-mismatch-penalty` | 0.04 | BWA mismatch penalty (-n parameter) |
+```
+# scaffold_file               nickname
+/data/refs/mt_scaffolds.txt   mitochondria
+/data/refs/y_scaffolds.txt    y_chromosome
+```
 
-### Pipeline Options
+Scaffold files are plain text, one scaffold name per line, matching sequence names in the
+BAM header exactly.
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--remap` | False | Generate remapped BAM file of recovered reads |
-| `--remap-quality` | 20 | Minimum mapping quality for remapping step |
-| `--keep-temp` | False | Keep temporary files |
-| `--dry-run` | False | Perform Snakemake dry run only |
+The textfile for the scaffold list can be made by using faidx, taking the first column e.g: `cut -f1 > SCAFFOLDS.txt `
 
-### Tool Paths
+---
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--fastp-path` | "fastp" | Path to fastp executable |
-| `--bwa-path` | "bwa" | Path to BWA executable |
-| `--samtools-path` | "samtools" | Path to samtools executable |
+## Output files
 
-## Pipeline Workflow
+### Full output (default)
 
-### For FASTQ Input (Paired-End)
-
-1. **Input Detection**: Identify R1 and R2 files
-2. **Preprocessing**: fastp deduplication, quality filtering, and merging
-3. **Reference Indexing**: Index reference genome for BWA (if needed)
-4. **Alignment**: BWA aln with mapq=0 to retain multi-mapping reads
-5. **BAM Cleanup**: Remove duplicates, sort, and index
-6. **Statistics**: Calculate mapping statistics
-7. **MT Filtering**: Extract reads mapping to mitochondrial scaffold
-8. **NUMTS Identification**: Run FragmentsMappingTwicePY.py
-9. **[Optional] Remapping**: Remap recovered sequences to MT genome
-
-### For FASTQ Input (Single-End)
-
-Same as paired-end, but skips merging step in preprocessing.
-
-### For BAM Input
-
-1. **Input Validation**: Check BAM file and warn about mapq=0 requirement
-2. **BAM Cleanup**: Remove duplicates, sort, and index
-3. **Statistics**: Calculate mapping statistics
-4. **MT Filtering**: Extract reads mapping to mitochondrial scaffold
-5. **NUMTS Identification**: Run FragmentsMappingTwicePY.py
-6. **[Optional] Remapping**: Remap recovered sequences to MT genome
-
-## Output Files
-
-### Standard Output (Always Generated)
+With `-s` (single ref), files go directly in `output/`.
+With `-r` (multi-ref), files go in `output/<nickname>/`.
 
 | File | Description |
 |------|-------------|
-| `numts.txt` | List of read IDs identified as NUMTs (map better to nuclear than MT) |
-| `records_<MT_NAME>.txt` | Summary statistics (MT-only mappings, MT+nuclear mappings, NUMTS count) |
-| `config.yaml` | Configuration file used for the run |
-| `logs/` | Directory containing log files for each step |
-| `stats/<sample>_mapping_stats.txt` | Mapping statistics |
+| `<name>_unique.bam` | Unique target reads (MAPQ > threshold). BAM header stripped of non-target `@SQ` lines. Indexed automatically. |
+| `<name>_unique.bam.bai` | BAI index for unique BAM. |
+| `<name>_recovered_R1.fq.gz` | Recovered ambiguous reads — R1 of a pair. |
+| `<name>_recovered_R2.fq.gz` | Recovered ambiguous reads — R2 of a pair. |
+| `<name>_recovered_merged.fq.gz` | Recovered ambiguous reads — merged or single-end. |
+| `<name>_recovered_ids.txt` | Read names kept from the ambiguous pool. |
+| `<name>_discarded_ids.txt` | Read names discarded from the ambiguous pool. |
+| `<name>_summary.txt` | Run statistics (see below). |
 
-### Optional Output (When --remap is specified)
+### Stats-only output
 
-| File | Description |
-|------|-------------|
-| `<sample>_recovered.bam` | BAM file of recovered (non-NUMTS) sequences remapped to MT genome |
-| `<sample>_recovered.bam.bai` | Index for recovered BAM file |
+With `--stats-only`, only `<name>_summary.txt` files are written, directly in `output/`
+regardless of whether `-s` or `-r` is used.
 
-### Intermediate Files (Kept with --keep-temp)
+### Summary file contents
 
-| Directory | Contents |
-|-----------|----------|
-| `preprocessed/` | Merged/filtered FASTQ files from fastp |
-| `alignment/` | Initial alignment BAM files |
-| `processed/` | Cleaned and sorted BAM files |
-| `filtered/` | MT-filtered BAM and text files |
-| `remapping/` | Files for remapping step |
+```
+Reference:           Alien
+Input BAM:           /path/to/aligned.bam
+MAPQ threshold:      0
+Stats only:          no
 
-## Important Notes
+Total mapped reads:          3500000
+Touch target scaffold:       45000  (1.3%)
 
-### BAM File Requirements
+Unique target reads (MAPQ > 0): 40000
 
-**CRITICAL**: If providing a pre-aligned BAM file, it MUST have been aligned with **minimum mapping quality = 0** to retain multi-mapping reads. This is essential for NUMTS detection. The pipeline will warn you about this requirement.
+Ambiguous reads (MAPQ=0, target-touching):
+  Target-only (no competing alignments): 2100
+  Recovered (target strictly better NM): 1800
+  Ties (equal NM, kept):                 300
+  Discarded (non-target better):         900
+  Not touching target:                   3455000
+  Skipped (no NM tag):                   12
 
-### Mitochondrial Genome
+Recovered FASTQ:
+  R1 reads:        1050
+  R2 reads:        970
+  Merged/SE reads: 380
+  Total:           2400
+```
 
-The mitochondrial scaffold(s) specified with `-m` must be present in the reference genome provided with `-r`. The pipeline will extract the MT genome for remapping if `--remap` is specified.
+---
 
-### Single-End Reads
+## Workflow
 
-If only single-end reads are found, the pipeline will automatically switch to single-end mode and issue a warning. NUMTS detection may have reduced sensitivity in single-end mode.
+### Overview
 
-### Memory and Performance
+```
+reads.fq
+    │
+    ├─── Step 1 ──► Map to COMBINED reference       (target + non-target)
+    │                MAPQ=0 must be retained                │
+    │                                                       ▼
+    │                           Step 2 ──► comfrt.py
+    │                                   │
+    │                      ┌────────────┴────────────┐
+    │                      ▼                         ▼
+    │              <name>_unique.bam        recovered_R1/R2/merged.fq.gz
+    │              (MAPQ > threshold,       (ambiguous reads where target
+    │               header = target only)    alignment wins or ties)
+    │                      │                       │
+    ├─── Step 3  ──► Map to TARGET reference only  │          Step 4
+    │                (used for final BAM)          └──► Remap recovered reads
+    │                       │                           to TARGET reference
+    │                       │                                    │
+    │                       └──────────────┬─────────────────────┘
+    │                                      ▼
+    └─────────────────────────────► Step 5: Merge BAMs
+                                    samtools merge final.bam \
+                                        target_only.bam \
+                                        remapped_recovered.bam
+```
 
-- Processing time depends on input size and number of threads
-- For large genomes, ensure sufficient RAM (recommend 8GB+ per sample)
-- Use more threads (`-t`) to speed up processing
+**Why two separate mappings (Step 1 and Step 3)?**
 
-## Examples
+The unique BAM from Step 2 has its `@SQ` header stripped down to target scaffolds only.
+The remapped BAM from Step 4 is also aligned to the target reference only.
+Both BAMs therefore share the same header, which is a hard requirement for `samtools merge`.
+Merging against the combined-reference BAM from Step 1 would fail due to mismatched headers.
 
-### Example 1: Basic NUMTS Identification from Reads
+---
+
+### Step 1 — Map to combined reference (MAPQ=0 retained)
 
 ```bash
-./numts_pipeline.py \
-    -i /data/tiger/reads/ \
-    -r /ref/tiger_genome.fasta \
-    -m NC_010642.1 \
-    -o /results/tiger_numts/ \
-    -s tiger_001 \
-    -t 8
+# BWA backtrack (short/ancient reads)
+bwa aln -t 16 combined_ref.fa.gz reads_R1.fq.gz > R1.sai
+bwa aln -t 16 combined_ref.fa.gz reads_R2.fq.gz > R2.sai
+bwa sampe combined_ref.fa.gz R1.sai R2.sai reads_R1.fq.gz reads_R2.fq.gz \
+    | samtools sort -@ 16 -o combined.bam
+samtools index combined.bam
 ```
 
-**Output**: `numts.txt` and `records_NC_010642.1.txt`
+> Do **not** filter with `samtools view -q` — MAPQ=0 reads are required by Step 2.
 
-### Example 2: Full Pipeline with Remapping
+---
+
+### Step 3 — Map to target reference only
 
 ```bash
-./numts_pipeline.py \
-    -i /data/tiger/reads/ \
-    -r /ref/tiger_genome.fasta \
-    -m NC_010642.1 \
-    -o /results/tiger_numts/ \
-    -s tiger_001 \
-    -t 16 \
-    --remap \
-    --remap-quality 30
+bwa aln -t 16 target_ref.fa.gz reads_R1.fq.gz > R1_t.sai
+bwa aln -t 16 target_ref.fa.gz reads_R2.fq.gz > R2_t.sai
+bwa sampe target_ref.fa.gz R1_t.sai R2_t.sai reads_R1.fq.gz reads_R2.fq.gz \
+    | samtools view -q 1 -b \
+    | samtools sort -@ 16 -o target_only.bam
+samtools index target_only.bam
 ```
 
-**Output**: `numts.txt`, `records_NC_010642.1.txt`, and `tiger_001_recovered.bam`
+This can run in parallel with Step 1.
 
-### Example 3: From Pre-aligned BAM
+---
+
+### Step 2 — Run competitive filter
 
 ```bash
-./numts_pipeline.py \
-    -i /data/tiger/aligned.bam \
-    -r /ref/tiger_genome.fasta \
-    -m NC_010642.1 \
-    -o /results/tiger_numts/ \
-    -s tiger_001
+comfrt.py \
+    -i combined.bam \
+    -s target_scaffolds.txt \
+    -o results/ \
+    -n my_sample \
+    -t 16
 ```
 
-**Output**: `numts.txt` and `records_NC_010642.1.txt`
+Outputs:
+- `results/my_sample_unique.bam` — unambiguous target reads, header already target-only
+- `results/my_sample_recovered_R1/R2/merged.fq.gz` — ambiguous reads rescued by competitive NM
 
-### Example 4: Dry Run to Check Pipeline
+---
+
+### Step 4 — Remap recovered reads to target reference
 
 ```bash
-./numts_pipeline.py \
-    -i /data/tiger/reads/ \
-    -r /ref/tiger_genome.fasta \
-    -m NC_010642.1 \
-    -o /results/tiger_numts/ \
-    --dry-run
+# Remap R1+R2 (paired)
+bwa aln -t 16 target_ref.fa.gz results/my_sample_recovered_R1.fq.gz > rec_R1.sai
+bwa aln -t 16 target_ref.fa.gz results/my_sample_recovered_R2.fq.gz > rec_R2.sai
+bwa sampe target_ref.fa.gz rec_R1.sai rec_R2.sai \
+    results/my_sample_recovered_R1.fq.gz \
+    results/my_sample_recovered_R2.fq.gz \
+    | samtools sort -@ 16 -o remapped_pe.bam
+
+# Remap merged/SE reads separately if present
+bwa aln -t 16 target_ref.fa.gz results/my_sample_recovered_merged.fq.gz > rec_m.sai
+bwa samse target_ref.fa.gz rec_m.sai results/my_sample_recovered_merged.fq.gz \
+    | samtools sort -@ 16 -o remapped_se.bam
+
+samtools merge -f remapped_recovered.bam remapped_pe.bam remapped_se.bam
+samtools index remapped_recovered.bam
 ```
 
-This will show which rules would be executed without running them.
+---
 
-### Example 5: Custom Quality Settings for Ancient DNA
+### Step 5 — Merge into final BAM
+
+All three BAMs were aligned to the same target reference — their headers are compatible.
 
 ```bash
-./numts_pipeline.py \
-    -i /data/ancient_tiger/reads/ \
-    -r /ref/tiger_genome.fasta \
-    -m NC_010642.1 \
-    -o /results/ancient_tiger/ \
-    -s ancient_tiger_001 \
-    -t 16 \
-    --min-quality 20 \
-    --min-length 25 \
-    --bwa-mismatch-penalty 0.05 \
-    --remap
+samtools merge -f final.bam \
+    target_only.bam \
+    results/my_sample_unique.bam \
+    remapped_recovered.bam
+samtools sort -@ 16 -o final_sorted.bam final.bam
+samtools index final_sorted.bam
 ```
 
-## Understanding the Output
+---
 
-### numts.txt
+## Notes
 
-Each line contains a read ID that was identified as a NUMTS. These are reads that:
-- Map to both mitochondrial and nuclear genomes
-- Map better to the nuclear genome than to the mitochondrial genome
+- **MAPQ threshold** (`-q`): default `0` means any read with MAPQ ≥ 1 on a target scaffold
+  is "unique". For stricter uniqueness, use `-q 20` or `-q 25`. Common BWA behaviour:
+  MAPQ=0 means the read maps equally well to ≥ 2 places; MAPQ=25/37 indicates a unique hit.
 
-### records_<MT_NAME>.txt
+- **Multi-reference single pass**: when using `-r`, all scaffold sets are evaluated
+  simultaneously in one pass. A read can be classified differently for each reference —
+  e.g. "unique" for mitochondria but "not touching" for Y chromosome. Each reference
+  is fully independent.
 
-Contains four lines with summary statistics:
-```
-No. of sequences binding only to the MT genome: <count>
-No. of sequences binding once to the MT and once or more to the nuclear genome: <count>
-No. of numts: <count>
-No. of sequences mapping better to MT than to nucl: <count>
-```
+- **Ties are kept**: reads where the best target NM equals the best non-target NM are
+  written to the recovered FASTQ (counted separately as "ties" in the summary).
 
-### Recovered BAM (if --remap specified)
-
-Contains only the sequences that map well to the mitochondrial genome after NUMTS removal. Useful for downstream mitochondrial genome analysis.
-
-## Troubleshooting
-
-### Error: "No FASTQ or BAM files found"
-
-**Solution**: Ensure your input directory contains properly named FASTQ files (_1/_2 or _s1/_s2 or _r1/_r2 suffixes) or specify files directly.
-
-### Error: "Reference already indexed, skipping..."
-
-**Info**: This is normal - the pipeline detected existing BWA index files.
-
-### Warning: "Using single-stranded read mode"
-
-**Info**: Only one FASTQ file was found. Pipeline will proceed with single-end mode. Consider checking if R2 file is missing.
-
-### Low NUMTS Count
-
-**Possible causes**:
-- Input BAM was filtered with high mapping quality
-- Very few multi-mapping reads in the data
-- Wrong mitochondrial scaffold name specified
-
-### Pipeline Fails at Alignment Step
-
-**Solutions**:
-- Check that BWA is installed and in PATH
-- Verify reference genome is valid FASTA format
-- Ensure sufficient disk space for intermediate files
-
-## Citation
-
-If you use this pipeline, please cite:
-
-```
-FragmentsMappingTwicePY.py - Written by Kirstine Tersbøl Melsen, s215096
-Pipeline wrapper - Generated for NUMTS analysis project
-```
-
-## Contact
-
-For issues, questions, or suggestions, please contact the maintainer or open an issue on the repository.
-
-## License
-
-[Specify your license here]
-
-## Version History
-
-- **v1.0.0** (2025-11-10): Initial release with full pipeline functionality
-  - Input detection for DS/SS/BAM
-  - Preprocessing with fastp
-  - BWA alignment with configurable parameters
-  - NUMTS identification
-  - Optional remapping to MT genome
+- **PE awareness**: recovered reads are split into R1/R2/merged based on BAM pair flags.
+  All three FASTQ files are always written, even if empty.

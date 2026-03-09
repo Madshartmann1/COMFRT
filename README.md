@@ -208,97 +208,6 @@ reads.fq
                                         remapped_recovered.bam
 ```
 
-**Why two separate mappings (Step 1 and Step 3)?**
-
-The unique BAM from Step 2 has its `@SQ` header stripped down to target scaffolds only.
-The remapped BAM from Step 4 is also aligned to the target reference only.
-Both BAMs therefore share the same header, which is a hard requirement for `samtools merge`.
-Merging against the combined-reference BAM from Step 1 would fail due to mismatched headers.
-
----
-
-### Step 1 — Map to combined reference (MAPQ=0 retained)
-
-```bash
-# BWA backtrack (short/ancient reads)
-bwa aln -t 16 combined_ref.fa.gz reads_R1.fq.gz > R1.sai
-bwa aln -t 16 combined_ref.fa.gz reads_R2.fq.gz > R2.sai
-bwa sampe combined_ref.fa.gz R1.sai R2.sai reads_R1.fq.gz reads_R2.fq.gz \
-    | samtools sort -@ 16 -o combined.bam
-samtools index combined.bam
-```
-
-> Do **not** filter with `samtools view -q` — MAPQ=0 reads are required by Step 2.
-
----
-
-### Step 3 — Map to target reference only
-
-```bash
-bwa aln -t 16 target_ref.fa.gz reads_R1.fq.gz > R1_t.sai
-bwa aln -t 16 target_ref.fa.gz reads_R2.fq.gz > R2_t.sai
-bwa sampe target_ref.fa.gz R1_t.sai R2_t.sai reads_R1.fq.gz reads_R2.fq.gz \
-    | samtools view -q 1 -b \
-    | samtools sort -@ 16 -o target_only.bam
-samtools index target_only.bam
-```
-
-This can run in parallel with Step 1.
-
----
-
-### Step 2 — Run competitive filter
-
-```bash
-comfrt.py \
-    -i combined.bam \
-    -s target_scaffolds.txt \
-    -o results/ \
-    -n my_sample \
-    -t 16
-```
-
-Outputs:
-- `results/my_sample_unique.bam` — unambiguous target reads, header already target-only
-- `results/my_sample_recovered_R1/R2/merged.fq.gz` — ambiguous reads rescued by competitive NM
-
----
-
-### Step 4 — Remap recovered reads to target reference
-
-```bash
-# Remap R1+R2 (paired)
-bwa aln -t 16 target_ref.fa.gz results/my_sample_recovered_R1.fq.gz > rec_R1.sai
-bwa aln -t 16 target_ref.fa.gz results/my_sample_recovered_R2.fq.gz > rec_R2.sai
-bwa sampe target_ref.fa.gz rec_R1.sai rec_R2.sai \
-    results/my_sample_recovered_R1.fq.gz \
-    results/my_sample_recovered_R2.fq.gz \
-    | samtools sort -@ 16 -o remapped_pe.bam
-
-# Remap merged/SE reads separately if present
-bwa aln -t 16 target_ref.fa.gz results/my_sample_recovered_merged.fq.gz > rec_m.sai
-bwa samse target_ref.fa.gz rec_m.sai results/my_sample_recovered_merged.fq.gz \
-    | samtools sort -@ 16 -o remapped_se.bam
-
-samtools merge -f remapped_recovered.bam remapped_pe.bam remapped_se.bam
-samtools index remapped_recovered.bam
-```
-
----
-
-### Step 5 — Merge into final BAM
-
-All three BAMs were aligned to the same target reference — their headers are compatible.
-
-```bash
-samtools merge -f final.bam \
-    target_only.bam \
-    results/my_sample_unique.bam \
-    remapped_recovered.bam
-samtools sort -@ 16 -o final_sorted.bam final.bam
-samtools index final_sorted.bam
-```
-
 ---
 
 ## Notes
@@ -309,7 +218,7 @@ samtools index final_sorted.bam
 
 - **Multi-reference single pass**: when using `-r`, all scaffold sets are evaluated
   simultaneously in one pass. A read can be classified differently for each reference —
-  e.g. "unique" for mitochondria but "not touching" for Y chromosome. Each reference
+  e.g. "unique" for one target but "not touching" for another. Each reference
   is fully independent.
 
 - **Ties are kept**: reads where the best target NM equals the best non-target NM are
@@ -317,3 +226,9 @@ samtools index final_sorted.bam
 
 - **PE awareness**: recovered reads are split into R1/R2/merged based on BAM pair flags.
   All three FASTQ files are always written, even if empty.
+
+- **Header compatibility for merging (Steps 3–5)**: `samtools merge` requires all input
+  BAMs to share the same `@SQ` header lines. The unique BAM from Step 2 is already stripped
+  to target-scaffold headers only. Steps 3 and 4 must therefore align against the same
+  isolated target reference — not the combined one from Step 1 — to produce a compatible header.
+  Attempting to merge the combined-reference BAM directly would fail.

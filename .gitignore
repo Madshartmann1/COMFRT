@@ -1,2 +1,5 @@
 scripts/old/
 scripts/__pycache__/
+Data/
+__pycache__/
+reminders 

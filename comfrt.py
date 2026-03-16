@@ -193,8 +193,6 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
             ref['r1_out']       = os.path.join(ref_dir, f"{ref['name']}_recovered_R1.fq.gz")
             ref['r2_out']       = os.path.join(ref_dir, f"{ref['name']}_recovered_R2.fq.gz")
             ref['merged_out']   = os.path.join(ref_dir, f"{ref['name']}_recovered_merged.fq.gz")
-            ref['ids_file']     = os.path.join(ref_dir, f"{ref['name']}_recovered_ids.txt")
-            ref['discard_file'] = os.path.join(ref_dir, f"{ref['name']}_discarded_ids.txt")
 
         ref['stats'] = {
             'unique':      0,
@@ -221,8 +219,6 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
                 ref['f1']   = stack.enter_context(gzip.open(ref['r1_out'],     'wt'))
                 ref['f2']   = stack.enter_context(gzip.open(ref['r2_out'],     'wt'))
                 ref['fm']   = stack.enter_context(gzip.open(ref['merged_out'], 'wt'))
-                ref['fids'] = stack.enter_context(open(ref['ids_file'],    'w'))
-                ref['fdis'] = stack.enter_context(open(ref['discard_file'], 'w'))
 
         for read in inbam:
             if read.is_unmapped:
@@ -265,7 +261,6 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
                                         ref['fm'].write(rec); ref['merged_count'] += 1
                                 else:
                                     ref['fm'].write(rec); ref['merged_count'] += 1
-                            ref['fids'].write(read.query_name + '\n')
 
                         if result == 'tie':
                             st['ties'] += 1
@@ -277,8 +272,6 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
                             else:
                                 st['target_only'] += 1
                     else:
-                        if not stats_only:
-                            ref['fdis'].write(read.query_name + '\n')
                         st['discarded'] += 1
 
     # Index unique BAMs
@@ -397,8 +390,6 @@ def main():
             '  <name>_recovered_R1.fq.gz      Recovered ambiguous reads — R1 of a pair.\n'
             '  <name>_recovered_R2.fq.gz      Recovered ambiguous reads — R2 of a pair.\n'
             '  <name>_recovered_merged.fq.gz  Recovered ambiguous reads — merged or SE.\n'
-            '  <name>_recovered_ids.txt       Read names kept from the ambiguous pool.\n'
-            '  <name>_discarded_ids.txt       Read names discarded from the ambiguous pool.\n'
             '  <name>_summary.txt             Run statistics.\n'
             '\n'
             'Stats-only output (flat, directly in output dir):\n'

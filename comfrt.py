@@ -5,7 +5,7 @@ Recovers reads from a BAM aligned to a combined reference (target + non-target
 scaffolds).  Single-pass over the input BAM using pysam:
 
   Unique reads   MAPQ > threshold on a target scaffold
-                 → written directly to a cleaned BAM (non-target @SQ removed)
+                 → written directly to a new BAM
 
   Ambiguous reads  MAPQ = 0 and touches a target scaffold (primary or XA tag)
                  → classified by comparing best NM across target vs non-target
@@ -215,12 +215,8 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
 
         if not stats_only:
             for ref in refs:
-                # Cleaned BAM header: only @SQ entries for this ref's scaffolds
-                hdr = inbam.header.to_dict()
-                hdr['SQ'] = [sq for sq in hdr.get('SQ', []) if sq['SN'] in ref['scaffolds']]
-                clean_header = pysam.AlignmentHeader.from_dict(hdr)
                 ref['bam_out'] = stack.enter_context(
-                    pysam.AlignmentFile(ref['unique_bam'], 'wb', header=clean_header, threads=threads)
+                    pysam.AlignmentFile(ref['unique_bam'], 'wb', template=inbam, threads=threads)
                 )
                 ref['f1']   = stack.enter_context(gzip.open(ref['r1_out'],     'wt'))
                 ref['f2']   = stack.enter_context(gzip.open(ref['r2_out'],     'wt'))
@@ -359,7 +355,7 @@ def main():
             'non-target scaffolds.  Reads are split into two pools based on MAPQ:\n'
             '\n'
             '  UNIQUE   MAPQ > threshold AND maps to a target scaffold\n'
-            '           → written to a cleaned BAM (non-target @SQ lines removed)\n'
+            '           → written directly to a new BAM\n'
             '\n'
             '  AMBIGUOUS  MAPQ = 0 AND touches a target scaffold\n'
             '             (primary alignment or any BWA XA secondary entry)\n'
@@ -396,7 +392,7 @@ def main():
             '  /path/to/y_scaffolds.txt     y_chromosome\n'
             '\n'
             'Full output (per reference, subfolders when multi-ref):\n'
-            '  <name>_unique.bam              Unique target reads, header stripped,\n'
+            '  <name>_unique.bam              Unique target reads,\n'
             '                                 indexed automatically.\n'
             '  <name>_recovered_R1.fq.gz      Recovered ambiguous reads — R1 of a pair.\n'
             '  <name>_recovered_R2.fq.gz      Recovered ambiguous reads — R2 of a pair.\n'

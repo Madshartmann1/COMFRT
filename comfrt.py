@@ -112,6 +112,59 @@ def read_to_fastq_str(read):
     return f"@{read.query_name}\n{seq}\n+\n{qual_str}\n"
 
 
+def write_recovered_read_to_bucket(read, recovered_fastq_record, reference_config):
+    """
+    Write one recovered read to the correct FASTQ bucket.
+
+    Only true read pairs are written to R1/R2. If a mate is missing, the
+    singleton read is written to merged/SE during final flush.
+    """
+    if not read.is_paired:
+        reference_config['fm'].write(recovered_fastq_record)
+        reference_config['merged_count'] += 1
+        return
+
+    if not (read.is_read1 or read.is_read2):
+        reference_config['fm'].write(recovered_fastq_record)
+        reference_config['merged_count'] += 1
+        return
+
+    pending_pairs_by_query_name = reference_config['pending_pairs_by_query_name']
+    query_name = read.query_name
+    pair_entry = pending_pairs_by_query_name.setdefault(query_name, {'r1': None, 'r2': None})
+
+    if read.is_read1:
+        if pair_entry['r1'] is not None:
+            reference_config['fm'].write(pair_entry['r1'])
+            reference_config['merged_count'] += 1
+        pair_entry['r1'] = recovered_fastq_record
+    elif read.is_read2:
+        if pair_entry['r2'] is not None:
+            reference_config['fm'].write(pair_entry['r2'])
+            reference_config['merged_count'] += 1
+        pair_entry['r2'] = recovered_fastq_record
+
+    if pair_entry['r1'] is not None and pair_entry['r2'] is not None:
+        reference_config['f1'].write(pair_entry['r1'])
+        reference_config['f2'].write(pair_entry['r2'])
+        reference_config['r1_count'] += 1
+        reference_config['r2_count'] += 1
+        del pending_pairs_by_query_name[query_name]
+
+
+def flush_unpaired_recovered_reads(reference_config):
+    """Move any leftover recovered singleton mates into merged/SE output."""
+    pending_pairs_by_query_name = reference_config['pending_pairs_by_query_name']
+    for pair_entry in pending_pairs_by_query_name.values():
+        if pair_entry['r1'] is not None:
+            reference_config['fm'].write(pair_entry['r1'])
+            reference_config['merged_count'] += 1
+        if pair_entry['r2'] is not None:
+            reference_config['fm'].write(pair_entry['r2'])
+            reference_config['merged_count'] += 1
+    pending_pairs_by_query_name.clear()
+
+
 def _header_line(tag, fields):
     """Format a SAM header line from a tag (HD/SQ/RG/PG) and key/value fields."""
     return "@" + tag + "\t" + "\t".join(
@@ -297,6 +350,7 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
         reference_config['r1_count'] = 0
         reference_config['r2_count'] = 0
         reference_config['merged_count'] = 0
+        reference_config['pending_pairs_by_query_name'] = {}
 
     total_mapped_reads = 0
     print(f"\n[1/2] Scanning BAM ({reference_count} reference{'s' if reference_count > 1 else ''})...")
@@ -345,19 +399,7 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
                         if not stats_only:
                             recovered_fastq_record = read_to_fastq_str(read)
                             if recovered_fastq_record is not None:
-                                if read.is_paired:
-                                    if read.is_read1:
-                                        reference_config['f1'].write(recovered_fastq_record)
-                                        reference_config['r1_count'] += 1
-                                    elif read.is_read2:
-                                        reference_config['f2'].write(recovered_fastq_record)
-                                        reference_config['r2_count'] += 1
-                                    else:
-                                        reference_config['fm'].write(recovered_fastq_record)
-                                        reference_config['merged_count'] += 1
-                                else:
-                                    reference_config['fm'].write(recovered_fastq_record)
-                                    reference_config['merged_count'] += 1
+                                write_recovered_read_to_bucket(read, recovered_fastq_record, reference_config)
 
                         if result == 'tie':
                             reference_stats['ties'] += 1
@@ -370,6 +412,10 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
                                 reference_stats['target_only'] += 1
                     else:
                         reference_stats['discarded'] += 1
+
+        if not stats_only:
+            for reference_config in refs:
+                flush_unpaired_recovered_reads(reference_config)
 
     # Rebuild and index unique BAMs with target-only headers
     if not stats_only:
@@ -386,6 +432,14 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
         recovered_r1_count = reference_config['r1_count']
         recovered_r2_count = reference_config['r2_count']
         recovered_merged_count = reference_config['merged_count']
+        ambiguous_target_touching_reads = (
+            reference_stats['target_only']
+            + reference_stats['recovered']
+            + reference_stats['ties']
+            + reference_stats['discarded']
+            + reference_stats['skipped_nm']
+        )
+        total_ambiguous_reads = ambiguous_target_touching_reads + reference_stats['not_target']
         target_touching_reads = (
             reference_stats['unique']
             + reference_stats['target_only']
@@ -400,12 +454,14 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
         print(f"Reference: {reference_config['name']}")
         print(f"  Total mapped reads:            {total_mapped_reads}")
         print(f"  Touch target scaffold:         {target_touching_reads}  ({target_touching_percent:.1f}%)")
+        print(f"  Total ambiguous (MAPQ=0):      {total_ambiguous_reads}")
+        print(f"    └─ target-touching:          {ambiguous_target_touching_reads}")
+        print(f"    └─ not touching target:      {reference_stats['not_target']}")
         print(f"  Unique target reads:           {reference_stats['unique']}")
         print(f"  Ambiguous → target-only:       {reference_stats['target_only']}")
         print(f"  Ambiguous → recovered:         {reference_stats['recovered']}")
         print(f"  Ambiguous → ties (kept):       {reference_stats['ties']}")
         print(f"  Ambiguous → discarded:         {reference_stats['discarded']}")
-        print(f"  Ambiguous → not touching:      {reference_stats['not_target']}")
         if reference_stats['skipped_nm']:
             print(f"  Skipped (no NM tag):           {reference_stats['skipped_nm']}")
         if not stats_only:
@@ -431,9 +487,16 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
             summary_file_handle.write(
                 f"Unique target reads (MAPQ > {mapq}): {reference_stats['unique']}\n\n"
             )
-            summary_file_handle.write("Ambiguous reads (MAPQ=0, target-touching):\n")
+            summary_file_handle.write(f"Total ambiguous reads (MAPQ=0): {total_ambiguous_reads}\n")
             summary_file_handle.write(
-                f"  Target-only (no competing alignments): {reference_stats['target_only']}\n"
+                f"  Target-touching ambiguous:     {ambiguous_target_touching_reads}\n"
+            )
+            summary_file_handle.write(
+                f"  Not touching target:           {reference_stats['not_target']}\n\n"
+            )
+            summary_file_handle.write("Target-touching ambiguous breakdown:\n")
+            summary_file_handle.write(
+                f"  Target-only (multiple alignments): {reference_stats['target_only']}\n"
             )
             summary_file_handle.write(
                 f"  Recovered (target strictly better NM): {reference_stats['recovered']}\n"
@@ -443,9 +506,6 @@ def run_pipeline(bam, refs, outdir, stats_only, mapq, threads, samtools_path):
             )
             summary_file_handle.write(
                 f"  Discarded (non-target better):         {reference_stats['discarded']}\n"
-            )
-            summary_file_handle.write(
-                f"  Not touching target:                   {reference_stats['not_target']}\n"
             )
             if reference_stats['skipped_nm']:
                 summary_file_handle.write(

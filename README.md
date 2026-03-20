@@ -139,8 +139,6 @@ With `-r` (multi-ref), files go in `output/<nickname>/`.
 | `<name>_recovered_R1.fq.gz` | Recovered ambiguous reads — R1 of a pair. |
 | `<name>_recovered_R2.fq.gz` | Recovered ambiguous reads — R2 of a pair. |
 | `<name>_recovered_merged.fq.gz` | Recovered ambiguous reads — merged or single-end. |
-| `<name>_recovered_ids.txt` | Read names kept from the ambiguous pool. |
-| `<name>_discarded_ids.txt` | Read names discarded from the ambiguous pool. |
 | `<name>_summary.txt` | Run statistics (see below). |
 
 ### Stats-only output
@@ -151,29 +149,33 @@ regardless of whether `-s` or `-r` is used.
 ### Summary file contents
 
 ```
+Competitive Mapping Filter - Summary
+========================================
 Reference:           Alien
 Input BAM:           /path/to/aligned.bam
-MAPQ threshold:      0
+MAPQ threshold:      20
 Stats only:          no
 
-Total mapped reads:          3500000
-Touch target scaffold:       45000  (1.3%)
+Total mapped reads:          4103781
+Touch target scaffold:       3347917  (81.6%)
 
-Unique target reads (MAPQ > 0): 40000
+Unique target reads (MAPQ > 20): 2981495
 
-Ambiguous reads (MAPQ=0, target-touching):
-  Target-only (no competing alignments): 2100
-  Recovered (target strictly better NM): 1800
-  Ties (equal NM, kept):                 300
-  Discarded (non-target better):         900
-  Not touching target:                   3455000
-  Skipped (no NM tag):                   12
+Total ambiguous reads (MAPQ=0): 462012
+  Target-touching ambiguous:     366422
+  Not touching target:           95590
+
+Target-touching ambiguous breakdown:
+  Target-only (multiple alignments): 321562
+  Recovered (target strictly better NM): 1193
+  Ties (equal NM, kept):                 42471
+  Discarded (non-target better):         1196
 
 Recovered FASTQ:
-  R1 reads:        1050
-  R2 reads:        970
-  Merged/SE reads: 380
-  Total:           2400
+  R1 reads:        31555
+  R2 reads:        31555
+  Merged/SE reads: 302116
+  Total:           365226
 ```
 
 ---

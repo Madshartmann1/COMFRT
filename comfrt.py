@@ -102,12 +102,30 @@ def classify(read, target_scaffolds):
         return 'discard'
 
 
+_REVCOMP_TABLE = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
+
+
+def _reverse_complement(seq):
+    return seq.translate(_REVCOMP_TABLE)[::-1]
+
+
 def read_to_fastq_str(read):
-    """Convert a pysam AlignedSegment to a FASTQ-formatted string."""
+    """
+    Convert a pysam AlignedSegment to a FASTQ-formatted string.
+
+    pysam's query_sequence/query_qualities are in BAM/alignment orientation:
+    for a reverse-strand read that's the reverse complement of what the
+    sequencer actually produced. Flip it back so the exported FASTQ matches
+    the original read orientation (required for correct remapping/merging).
+    """
     seq = read.query_sequence
     if seq is None:
         return None
     query_qualities = read.query_qualities
+    if read.is_reverse:
+        seq = _reverse_complement(seq)
+        if query_qualities is not None:
+            query_qualities = query_qualities[::-1]
     qual_str = ''.join(chr(quality_score + 33) for quality_score in query_qualities) if query_qualities is not None else 'I' * len(seq)
     return f"@{read.query_name}\n{seq}\n+\n{qual_str}\n"
 

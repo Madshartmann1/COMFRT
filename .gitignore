@@ -3,5 +3,12 @@ scripts/__pycache__/
 Data/
 __pycache__/
 reminders
-.gitignore
 scripts/
+test_output/
+.gitignore
+the_start/
+flowcharts/
+coprolite_example/
+COMFRT_TODO.md
+results_extraction/
+.gitignore
